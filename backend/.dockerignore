@@ -9,3 +9,6 @@ Dockerfile
 README.md
 API.md
 .DS_Store
+tests
+requirements-dev.txt
+.pytest_cache

@@ -1,0 +1,26 @@
+# Checks the Terraform in infra/ whenever it changes: formatting and validity.
+# Doesn't touch AWS; changes are applied by running `terraform apply` (see infra/README.md).
+name: Terraform checks
+
+on:
+  push:
+    branches: [main]
+    paths: ["infra/**"]
+  pull_request:
+    paths: ["infra/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate

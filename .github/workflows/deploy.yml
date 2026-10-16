@@ -1,0 +1,103 @@
+# On every push to main: test the backend, build both Docker images, push them to ECR,
+# and roll the ECS services onto them. Also runs tests (only) on pull requests.
+name: Test and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # "Run workflow" button in the Actions tab
+
+permissions:
+  id-token: write # lets the job ask GitHub for an OIDC token to log in to AWS
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT: readtheroom
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    # A throwaway Postgres, so the tests also cover the database used in production.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: readtheroom
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - run: pip install -r requirements-dev.txt
+
+      - name: Test (SQLite + local disk, as in local dev)
+        run: pytest -v
+
+      - name: Test (Postgres + S3, as on AWS)
+        run: pytest -v
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGPASSWORD: test
+          PGDATABASE: readtheroom
+          VIDEOS_BUCKET: test-videos
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: testing # fake: moto intercepts S3 calls
+          AWS_SECRET_ACCESS_KEY: testing
+
+  deploy:
+    needs: test
+    # Only from main, and only once AWS is set up (the AWS_ROLE_ARN variable exists).
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.AWS_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [backend, frontend]
+    concurrency:
+      group: deploy-${{ matrix.service }}
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service }}
+          push: true
+          # :latest is what ECS runs; the commit SHA tag records exactly which code each image holds.
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-${{ matrix.service }}:latest
+            ${{ steps.ecr.outputs.registry }}/${{ env.PROJECT }}-${{ matrix.service }}:${{ github.sha }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service --cluster "$PROJECT" --service "$PROJECT-${{ matrix.service }}" \
+            --force-new-deployment --query 'service.serviceName' --output text
+          echo "Waiting for the new containers to pass health checks..."
+          aws ecs wait services-stable --cluster "$PROJECT" --services "$PROJECT-${{ matrix.service }}"

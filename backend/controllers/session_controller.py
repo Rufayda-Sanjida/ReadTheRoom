@@ -1,13 +1,13 @@
+import os
 import re
-import shutil
-import sqlite3
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
-import config
 from models import reaction, session
+from models.database import IntegrityError
+from services import storage
 from views.schemas import Session, SessionCreate
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 @router.post("/upload-video")
 async def upload_video(file: UploadFile = File(...)):
-    """Upload a video file for a session, saving it to disk and returning its public URL."""
+    """Upload a video file for a session, saving it (disk locally, S3 on AWS) and returning its public URL."""
     if not file.filename:
         raise HTTPException(400, "Filename cannot be empty")
 
@@ -26,17 +26,16 @@ async def upload_video(file: UploadFile = File(...)):
 
     safe_base = re.sub(r"[^a-zA-Z0-9_\-\.]", "_", Path(file.filename).stem)
     unique_name = f"{uuid.uuid4().hex[:10]}_{safe_base}{ext}"
-    target_path = config.VIDEOS_DIR / unique_name
 
     try:
-        with open(target_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        file_size = file.file.seek(0, os.SEEK_END)
+        file.file.seek(0)
+        storage.save(unique_name, file.file)
     except Exception as e:
         raise HTTPException(500, f"Failed to save video file: {e}")
     finally:
         await file.close()
 
-    file_size = target_path.stat().st_size
     video_url = f"/api/videos/{unique_name}"
     return {
         "filename": unique_name,
@@ -59,7 +58,7 @@ def require_session(session_id: str) -> dict:
 def create_session(body: SessionCreate):
     try:
         session_id = session.create(body.id, body.name, body.video_url)
-    except sqlite3.IntegrityError:
+    except IntegrityError:
         raise HTTPException(409, f"Session '{body.id}' already exists")
     if body.reactions:
         reaction.add_many(session_id, [r.model_dump() for r in body.reactions])

@@ -5,3 +5,9 @@
 __pycache__/
 backend/data/videos/*
 !backend/data/videos/product_demo.mp4
+# terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+infra/terraform.tfvars
+.pytest_cache/

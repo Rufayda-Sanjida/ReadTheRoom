@@ -4,3 +4,6 @@ anthropic
 python-dotenv
 python-multipart
 google-genai
+# AWS: Postgres on RDS and video uploads on S3 (unused when running locally with SQLite)
+psycopg[binary]
+boto3
